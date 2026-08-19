@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::utils::{format_duration, Prefix, Sign};
+//use crate::utils::{format_duration, Prefix, Sign};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SplitFile {
@@ -15,27 +15,39 @@ pub struct SplitFile {
     pub completed: u32,
     pub split_names: Vec<String>,
     #[serde(default)]
-    pub golds: Vec<Option<Gold>>,
+    pub golds: Vec<Option<Segment>>,
     #[serde(default)]
-    pub personal_best: Option<PersonalBest>,
+    pub shits: Vec<Option<Segment>>,
+    #[serde(default)]
+    pub averages: Vec<Option<Segment>>,
+    #[serde(default)]
+    pub personal_best: Option<ActualRun>,
+    #[serde(default)]
+    pub personal_worst: Option<ActualRun>,
+    #[serde(default)]
+    pub total_runtime: Duration,
+
+    // Clears counter
+    #[serde(default)]
+    pub clears: Vec<u32>,
 
     #[serde(skip)]
     file_path: PathBuf,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Gold {
+pub struct Segment {
     #[serde(with = "duration_format")]
     pub duration: Duration,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct PersonalBest {
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ActualRun {
     pub attempt: u32,
     pub splits: Vec<Option<Split>>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Split {
     #[serde(with = "duration_format")]
     pub time: Duration,
@@ -141,62 +153,26 @@ pub fn read_split_file(path: &Path) -> anyhow::Result<SplitFile> {
     if split_file.split_names.is_empty() {
         return Err(anyhow!("Split names cannot be empty"));
     }
+    
+    if Some(split_file.total_runtime).is_none() {
+        split_file.total_runtime = Duration::ZERO;
+    }
 
     if split_file.golds.is_empty() {
         split_file.golds = vec![None; split_file.split_names.len()];
     }
-
-    if split_file.golds.len() != split_file.split_names.len() {
-        return Err(anyhow!(
-            "Split name count ({}) does not match gold count ({})",
-            split_file.split_names.len(),
-            split_file.golds.len()
-        ));
+    
+    if split_file.shits.is_empty() {
+        split_file.shits = vec![None; split_file.split_names.len()];
     }
     
-    if let Some(pb) = &split_file.personal_best {
-        if pb.splits.len() != split_file.split_names.len() {
-            return Err(anyhow!(
-                "Split name count ({}) does not match personal best split count ({})",
-                split_file.split_names.len(),
-                pb.splits.len(),
-            ));
-        }
+    if split_file.averages.is_empty() {
+        split_file.averages = vec![Some(Segment{duration: Duration::ZERO}); split_file.split_names.len()];
+    }
 
-        if pb.splits.last().unwrap().is_none() {
-            return Err(anyhow!("Last split of personal best cannot be null"));
-        }
-
-        for i in 0..split_file.split_names.len() {
-            let pb_split = pb.splits[i].as_ref();
-            let gold = split_file.golds[i].as_ref();
-            let prev_pb_split = if i == 0 {
-                None
-            } else {
-                pb.splits[i - 1].as_ref()
-            };
-
-            if let (Some(pb_split), Some(prev_pb_split)) = (pb_split, prev_pb_split) {
-                if pb_split.time < prev_pb_split.time {
-                    return Err(anyhow!(
-                        "Split {} ({}) is earlier than previous split",
-                        i + 1,
-                        format_duration(pb_split.time, 3, Sign::Positive, Prefix::NoneOrMinus)
-                    ));
-                }
-                if let Some(gold) = gold {
-                    let pb_dur = pb_split.time - prev_pb_split.time;
-                    if gold.duration > pb_dur {
-                        return Err(anyhow!(
-                            "Gold {} ({}) is longer than the PB segment",
-                            i + 1,
-                            format_duration(gold.duration, 3, Sign::Positive, Prefix::NoneOrMinus)
-                        ));
-                    }
-                }
-            }
-        }
-    } 
+    if split_file.clears.is_empty() {
+        split_file.clears = vec![0; split_file.split_names.len()];
+    }
 
     Ok(split_file)
 }

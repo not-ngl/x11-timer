@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::split_file::SplitFile;
+use crate::timer::ComparisonMode;
 
 #[derive(Debug)]
 pub enum TimerMode {
@@ -15,4 +16,5 @@ pub struct TimerState {
     pub mode: TimerMode,
     pub splits: Vec<Option<Duration>>,
     pub anim_ref_time: Instant,
+    pub comparison: ComparisonMode,
 }

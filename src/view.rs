@@ -1,17 +1,40 @@
 use std::time::Duration;
 
 use crossterm::style::{Attribute, Color};
+use crate::timer::ComparisonMode;
 
 use crate::{
     bigtext::get_big_text,
     rotty::{Block, Image, TextAlign},
     settings::Theme,
     timer_state::{TimerMode, TimerState},
-    utils::{format_duration, get_run_summary, parse_color, Prefix, SegSummary, Sign},
+    utils::{format_duration, get_run_summary, best_possible_time, parse_color, Prefix, SegSummary, Sign, },
 };
 
+#[derive(Clone, Copy)]
+struct ColumnWidths {
+    name: u16,    // split name
+    clears: u16,  // number of clears (the new column)
+    delta: u16,   // +/- delta
+    seg: u16,     // segment time
+    split: u16,   // split time
+}
+
 static TIMER_WIDTH: u16 = 48;
-static COL_WIDTH: u16 = 12;
+const DEFAULT_COLS: ColumnWidths = ColumnWidths {
+    name: 17,
+    clears: 4,
+    delta: 5,
+    seg: 11,
+    split: 11,
+};
+
+fn header_cell(text: &str, width: u16, theme: &Theme) -> Block {
+    Image::new(text, width, TextAlign::Right)
+        .fg_color(parse_color(theme.label_text))
+        .build()
+}
+
 pub fn render_view(timer: &TimerState, theme: &Theme) -> Block {
     let summary = get_run_summary(timer);
 
@@ -20,6 +43,15 @@ pub fn render_view(timer: &TimerState, theme: &Theme) -> Block {
         TimerMode::Running { start_time } => start_time.elapsed(),
         TimerMode::Paused { elapsed_at_pause } => elapsed_at_pause,
         TimerMode::Finished { start_time: _ } => timer.splits.last().unwrap().unwrap(),
+    };
+    let precision = precision_for_mode(&timer.mode);
+
+    let mode_label = match timer.comparison {
+        ComparisonMode::PersonalBest => "Comparison: Personal Best",
+        ComparisonMode::PersonalWorst => "Comparison: Personal Worst",
+        ComparisonMode::SumOfBest => "Comparison: Sum of Best",
+        ComparisonMode::SumOfWorst => "Comparison: Sum of Worst",
+        ComparisonMode::Average => "Comparison: Average",
     };
 
     let title = &timer.split_file.title;
@@ -31,11 +63,36 @@ pub fn render_view(timer: &TimerState, theme: &Theme) -> Block {
         .attr(Attribute::Bold)
         .build();
 
+    let mode_block = Image::new(mode_label, TIMER_WIDTH, TextAlign::Right)
+        .fg_color(parse_color(theme.label_text))
+        .build();
+
+    let elap = match timer.mode {
+        TimerMode::Running {start_time} => start_time.elapsed(),
+        TimerMode::Paused {elapsed_at_pause} => elapsed_at_pause,
+        TimerMode::Finished {..} => {
+            let splits = &timer.splits;
+            splits.last().unwrap().unwrap()
+        },
+        _ => Duration::ZERO,
+    };
+
+    let runtime_text = format!(
+        "Total runtime: {}",
+        format_duration(
+            timer.split_file.total_runtime + elap, 
+            -1, 
+            Sign::Positive, 
+            Prefix::NoneOrMinus)
+    );
+    let runtime_block = Image::new(&runtime_text, TIMER_WIDTH / 2, TextAlign::Left).build();
+
     let attempts_text = format!(
         "{}/{}",
         timer.split_file.completed, timer.split_file.attempts
     );
-    let attempts_block = Image::new(&attempts_text, TIMER_WIDTH, TextAlign::Right).build();
+    let attempts_block = Image::new(&attempts_text, TIMER_WIDTH / 2, TextAlign::Right).build();
+    let th_block = runtime_block.horiz(attempts_block);
 
     let spacer_block = Image::new(
         &" ".repeat(TIMER_WIDTH as usize),
@@ -44,11 +101,14 @@ pub fn render_view(timer: &TimerState, theme: &Theme) -> Block {
     )
     .build();
 
-    let headers = ["", "Delta", "Segment", "Split"].map(|h| {
-        Image::new(h, COL_WIDTH, TextAlign::Right)
-            .fg_color(parse_color(theme.label_text))
-            .build()
-    });
+    let cols = DEFAULT_COLS; 
+    let headers = [
+        header_cell("", cols.name, theme),          
+        header_cell("Clr", cols.clears, theme),    
+        header_cell("Δ", cols.delta, theme),       
+        header_cell("Seg", cols.seg, theme),       
+        header_cell("Split", cols.split, theme),   
+    ];
     let header_row = Block::hcat(headers);
 
     let line_sep = Image::new(
@@ -60,14 +120,15 @@ pub fn render_view(timer: &TimerState, theme: &Theme) -> Block {
     .build();
 
     let split_rows: Vec<Block> = (0..timer.split_file.split_names.len())
-        .map(|i| get_split_row(timer, i as u32, theme, &summary))
+        .map(|i| get_split_row(timer, i as u32, theme, &summary, precision))
         .collect();
 
     let mut sections = vec![
         title_block,
         category_block,
-        attempts_block,
-        spacer_block.clone(),
+        th_block,
+        mode_block,
+        //spacer_block.clone(),
         header_row,
         line_sep.clone(),
     ];
@@ -75,10 +136,11 @@ pub fn render_view(timer: &TimerState, theme: &Theme) -> Block {
     sections.extend([
         line_sep,
         spacer_block.clone(),
-        get_big_timer(timer, theme, &summary, elapsed),
+        get_big_timer(timer, theme, &summary, elapsed, precision),
         spacer_block,
-        get_prev_segment_block(timer, theme, &summary),
+        get_prev_segment_block(timer, theme, &summary, precision),
         get_sum_of_best_block(&summary),
+        get_best_possible_block(&summary),
     ]);
     Block::vcat(sections)
 }
@@ -88,6 +150,7 @@ fn get_big_timer(
     theme: &Theme,
     summary: &[SegSummary],
     elapsed: Duration,
+    precision: i32
 ) -> Block {
     let color = match timer.mode {
         TimerMode::Initial => parse_color(theme.ahead_gain),
@@ -104,7 +167,7 @@ fn get_big_timer(
 
     get_big_text(&format_duration(
         elapsed,
-        2,
+        precision,
         Sign::Positive,
         Prefix::NoneOrMinus,
     ))
@@ -112,18 +175,26 @@ fn get_big_timer(
     .fg_color(color)
 }
 
-fn get_split_row(timer: &TimerState, idx: u32, theme: &Theme, summary: &[SegSummary]) -> Block {
+fn get_split_row(timer: &TimerState, idx: u32, theme: &Theme, summary: &[SegSummary], precision: i32) -> Block {
     let split_name = &timer.split_file.split_names[idx as usize];
-    let name_col = Image::new(split_name, COL_WIDTH, TextAlign::Left).build();
+    let name_col = Image::new(split_name, DEFAULT_COLS.name, TextAlign::Left).build();
+    let clears = timer
+        .split_file
+        .clears
+        .get(idx as usize)
+        .cloned()
+        .unwrap_or(0);
+    let clears_text = clears.to_string();
+    let clears_col = Image::new(&clears_text, DEFAULT_COLS.clears, TextAlign::Right).build();
 
     // Build segment text
     let seg_dur = if (idx as usize) < timer.splits.len() {
         summary[idx as usize].live_seg
     } else {
-        summary[idx as usize].pb_seg
+        summary[idx as usize].base_segment
     };
     let seg_text = match seg_dur {
-        Some(seg_dur) => format_duration(seg_dur, 2, Sign::Positive, Prefix::NoneOrMinus),
+        Some(seg_dur) => format_duration(seg_dur, precision, Sign::Positive, Prefix::NoneOrMinus),
         None => "-".to_string(),
     };
 
@@ -131,15 +202,15 @@ fn get_split_row(timer: &TimerState, idx: u32, theme: &Theme, summary: &[SegSumm
     let split_dur = if (idx as usize) < timer.splits.len() {
         summary[idx as usize].live_split
     } else {
-        summary[idx as usize].pb_split
+        summary[idx as usize].base_split
     };
     let split_text = match split_dur {
-        Some(split_dur) => format_duration(split_dur, 2, Sign::Positive, Prefix::NoneOrMinus),
+        Some(split_dur) => format_duration(split_dur, precision, Sign::Positive, Prefix::NoneOrMinus),
         None => "-".to_string(),
     };
 
-    let seg_col = Image::new(&seg_text, COL_WIDTH, TextAlign::Right).build();
-    let split_col = Image::new(&split_text, COL_WIDTH, TextAlign::Right).build();
+    let seg_col = Image::new(&seg_text, DEFAULT_COLS.seg, TextAlign::Right).build();
+    let split_col = Image::new(&split_text, DEFAULT_COLS.split, TextAlign::Right).build();
     let delta_col = get_delta_block(timer, idx, theme, summary);
 
     let running = matches!(timer.mode, TimerMode::Running { start_time: _ });
@@ -153,7 +224,7 @@ fn get_split_row(timer: &TimerState, idx: u32, theme: &Theme, summary: &[SegSumm
     }
     let bg = bg_image.build();
 
-    bg.stack(Block::hcat([name_col, delta_col, seg_col, split_col]))
+    bg.stack(Block::hcat([name_col, clears_col, delta_col, seg_col, split_col]))
 }
 
 fn get_delta_color(idx: u32, theme: &Theme, summary: &[SegSummary]) -> Color {
@@ -184,14 +255,14 @@ fn get_delta_block(timer: &TimerState, idx: u32, theme: &Theme, summary: &[SegSu
         // - Hide till split time exceeds PB split time, if both exist
         // - Else hide indefinitely?
         let show = if let (Some(seg), Some(gold)) =
-            (summary[idx as usize].live_seg, summary[idx as usize].gold)
+            (summary[idx as usize].live_seg, summary[idx as usize].gold_segment)
         {
             seg >= gold
-        } else if let (Some(live_split), Some(pb_split)) = (
+        } else if let (Some(live_split), Some(base_split)) = (
             summary[idx as usize].live_split,
-            summary[idx as usize].pb_split,
+            summary[idx as usize].base_split,
         ) {
-            live_split >= pb_split
+            live_split >= base_split
         } else {
             true
         };
@@ -199,7 +270,7 @@ fn get_delta_block(timer: &TimerState, idx: u32, theme: &Theme, summary: &[SegSu
         if show {
             let dur_str = format_duration(
                 delta,
-                2,
+                1,
                 (!summary[idx as usize].live_delta_neg).into(),
                 Prefix::PlusOrMinus,
             );
@@ -208,18 +279,18 @@ fn get_delta_block(timer: &TimerState, idx: u32, theme: &Theme, summary: &[SegSu
             } else {
                 get_delta_color(idx, theme, summary)
             };
-            Image::new(&dur_str, COL_WIDTH, TextAlign::Right)
+            Image::new(&dur_str, DEFAULT_COLS.delta, TextAlign::Right)
                 .fg_color(color)
                 .build()
         } else {
-            Image::new(" ", COL_WIDTH, TextAlign::Left).build()
+            Image::new(" ", DEFAULT_COLS.delta, TextAlign::Left).build()
         }
     } else {
-        Image::new("-", COL_WIDTH, TextAlign::Right).build()
+        Image::new("-", DEFAULT_COLS.delta, TextAlign::Right).build()
     }
 }
 
-fn get_prev_segment_block(timer: &TimerState, theme: &Theme, summary: &[SegSummary]) -> Block {
+fn get_prev_segment_block(timer: &TimerState, theme: &Theme, summary: &[SegSummary], precision: i32) -> Block {
     let gained_dur = if timer.splits.is_empty() {
         None
     } else {
@@ -230,7 +301,7 @@ fn get_prev_segment_block(timer: &TimerState, theme: &Theme, summary: &[SegSumma
     let s;
     if let Some(gained_dur) = gained_dur {
         let neg = summary[timer.splits.len() - 1].gained_neg;
-        s = format_duration(gained_dur, 2, (!neg).into(), Prefix::PlusOrMinus);
+        s = format_duration(gained_dur, precision, (!neg).into(), Prefix::PlusOrMinus);
         color = if neg {
             parse_color(theme.ahead_gain)
         } else {
@@ -249,9 +320,9 @@ fn get_prev_segment_block(timer: &TimerState, theme: &Theme, summary: &[SegSumma
 }
 
 fn get_sum_of_best_block(summary: &[SegSummary]) -> Block {
-    let sob_text = if summary.iter().all(|seg| seg.gold.is_some()) {
-        let sob = summary.iter().map(|seg| seg.gold.as_ref().unwrap()).sum();
-        format_duration(sob, 2, Sign::Positive, Prefix::NoneOrMinus)
+    let sob_text = if summary.iter().all(|seg| seg.gold_segment.is_some()) {
+        let sob = summary.iter().map(|seg| seg.gold_segment.as_ref().unwrap()).sum();
+        format_duration(sob, 3, Sign::Positive, Prefix::NoneOrMinus)
     } else {
         "-".to_string()
     };
@@ -259,6 +330,21 @@ fn get_sum_of_best_block(summary: &[SegSummary]) -> Block {
     let label_col = Image::new("Sum of Best Segments", TIMER_WIDTH / 2, TextAlign::Left).build();
     let sob_col = Image::new(&sob_text, TIMER_WIDTH - TIMER_WIDTH / 2, TextAlign::Right).build();
     label_col.horiz(sob_col)
+}
+
+fn get_best_possible_block(summary: &[SegSummary]) -> Block {
+    let best_opt = best_possible_time(summary);
+
+    let text = if let Some(best) = best_opt {
+        format_duration(best, 3, Sign::Positive, Prefix::NoneOrMinus)
+    } else {
+        "-".to_string()
+    };
+
+    let label = Image::new("Best possible time", TIMER_WIDTH / 2, TextAlign::Left).build();
+    let value = Image::new(&text, TIMER_WIDTH - TIMER_WIDTH / 2, TextAlign::Right).build();
+
+    label.horiz(value)
 }
 
 fn hsl_to_color(h: f64, s: f64, l: f64) -> Color {
@@ -291,3 +377,12 @@ fn get_rainbow_color(timer: &TimerState) -> Color {
         % 1.0;
     hsl_to_color(t, 1.0, 0.6)
 }
+
+// precision function: allows to have different accuracy at the end of the run.
+fn precision_for_mode(mode: &TimerMode) -> i32 {
+    match mode {
+        TimerMode::Initial | TimerMode::Finished { .. } | TimerMode::Paused {..} => 3,
+        _ => 1, 
+    }
+}
+
