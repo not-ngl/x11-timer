@@ -16,7 +16,7 @@ mod timer_state;
 mod utils;
 mod view;
 
-static TARGET_FPS: i32 = 47;
+static TARGET_FPS: i32 = 61;
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
